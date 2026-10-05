@@ -33,6 +33,8 @@ parser.add_argument("--accel", action="store_true", default=False, help="Use GPT
 parser.add_argument("--torch_compile", action="store_true", default=False, help="Use torch.compile to optimize s2mel if available")
 parser.add_argument("--qwen_emo", action="store_true", default=False, help="Load QwenEmotion even on a low-VRAM GPU, where it is skipped by default")
 parser.add_argument("--gui_seg_tokens", type=int, default=120, help="GUI: Max tokens per generation segment")
+parser.add_argument("--share", action="store_true", default=False, help="Enable the sharing mode of Gradio WebUI for easier use on platforms such as Colab.")
+
 cmd_args = parser.parse_args()
 
 # Validate optional acceleration dependencies early, so missing extras fail
@@ -300,7 +302,11 @@ def on_preset_save(
     name = name.strip() if name else ""
     if not name:
         gr.Warning(i18n("预设名称不能为空"))
-        return gr.update()
+        # Callers index this result (`confirm_save_preset_from_modal` reads
+        # `result[0]`/`result[1]`), so EVERY path has to return two updates. A bare
+        # `gr.update()` is gradio's "skip" sentinel -- a plain dict -- and indexing
+        # it raises `KeyError: 0`.
+        return gr.update(), gr.update()
 
     data = _build_preset_data(
         emo_control_method, emo_weight,
@@ -329,14 +335,21 @@ def on_preset_save(
 
 
 def on_preset_load(name):
-    """Load a preset and return updates for all relevant UI components."""
+    """Load a preset and return updates for all relevant UI components.
+
+    The early-exit paths below return gradio's "skip" sentinel (a bare
+    `gr.update()`), NOT `{}`. This handler drives multi-output events, and gradio
+    wraps a lone non-tuple value into a one-element list, so an empty dict fails
+    its output-arity check with "didn't return enough output values". The
+    sentinel, by contrast, is expanded to skip every output.
+    """
     if not name:
-        return {}
+        return gr.update()
 
     data = load_preset(name)
     if data is None:
         gr.Warning(i18n("预设不存在"))
-        return {}
+        return gr.update()
 
     try:
         emo_method = int(data.get("emo_control_method", 0))
@@ -405,7 +418,7 @@ def on_preset_load(name):
         }
     except Exception as e:
         gr.Error(f"{i18n('加载预设失败')}: {e}")
-        return {}
+        return gr.update()
 
 
 def on_preset_delete(name):
@@ -804,12 +817,16 @@ with gr.Blocks(
                     )
                 else:
                     lang_dropdown = gr.State(value=None)
-                duration_factor = gr.Slider(
-                    label=i18n("时长系数"), minimum=0.5, maximum=2.0, value=1.0, step=0.01,
-                    info=f'{i18n("快")} ← — {i18n("不变")} — → {i18n("慢")}',
-                    key="duration_factor",
-                    visible=IS_V25,
-                )
+                if IS_V25:
+                    duration_factor = gr.Slider(
+                        label=i18n("时长系数"), minimum=0.5, maximum=2.0, value=1.0, step=0.01,
+                        info=f'{i18n("快")} ← — {i18n("不变")} — → {i18n("慢")}',
+                        key="duration_factor",
+                    )
+                else:
+                    # Keep the shared callback input order stable without
+                    # exposing a v2.5-only control in the v2 WebUI.
+                    duration_factor = gr.State(value=1.0)
             with gr.Column(scale=1):
                 gen_button = gr.Button(
                     i18n("生成语音"), key="gen_button", interactive=True
@@ -1375,4 +1392,4 @@ with gr.Blocks(
 
 if __name__ == "__main__":
     demo.queue(20)
-    demo.launch(server_name=cmd_args.host, server_port=cmd_args.port)
+    demo.launch(server_name=cmd_args.host, server_port=cmd_args.port,share=cmd_args.share)
